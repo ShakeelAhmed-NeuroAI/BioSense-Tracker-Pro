@@ -4,9 +4,9 @@ import csv
 import time
 import urllib.request
 import os
-from scipy.signal import butter, filtfilt, find_peaks
+from scipy.signal import butter, filtfilt
 
-# Download face detector XML automatically if missing
+# Ensure Haar Cascade XML file exists locally
 xml_filename = "haarcascade_frontalface_default.xml"
 if not os.path.exists(xml_filename):
     print("Downloading face detector XML...")
@@ -18,13 +18,13 @@ face_cascade = cv2.CascadeClassifier(xml_filename)
 class StableBioSenseEngine:
     def __init__(self, fps=30, window_size=180):
         self.fps = fps
-        self.window_size = window_size  # 6-second buffer window
+        self.window_size = window_size  # 6-second sliding buffer
         self.rgb_buffer = []
         self.bpm_history = []
         self.prev_face_box = None
 
     def smooth_face_box(self, new_box, alpha=0.90):
-        """Locks the face tracking box completely still to remove movement jitter."""
+        """Locks tracking box to prevent movement jitter."""
         if self.prev_face_box is None:
             self.prev_face_box = new_box
             return new_box
@@ -38,7 +38,7 @@ class StableBioSenseEngine:
         return self.prev_face_box
 
     def extract_forehead_skin(self, frame, face_box):
-        """Extracts color signals from forehead skin patch."""
+        """Extracts average RGB values from forehead skin patch."""
         x, y, w, h = self.smooth_face_box(face_box)
         fh_y1 = int(y + h * 0.18)
         fh_y2 = int(y + h * 0.35)
@@ -49,25 +49,24 @@ class StableBioSenseEngine:
         if forehead_roi.size == 0:
             return None
 
-        # Draw green tracking box on forehead
         cv2.rectangle(frame, (fh_x1, fh_y1), (fh_x2, fh_y2), (0, 255, 0), 2)
         mean_val = cv2.mean(forehead_roi)[:3]
         return mean_val  # (B, G, R)
 
     def pos_algorithm(self, rgb_signals):
-        """Plane-Orthogonal-to-Skin (POS) extraction."""
+        """Plane-Orthogonal-to-Skin (POS) rPPG extraction."""
         RGB = np.array(rgb_signals)
         mean_rgb = np.mean(RGB, axis=0) + 1e-6
         norm_rgb = RGB / mean_rgb
 
-        S1 = norm_rgb[:, 1] - norm_rgb[:, 2]  # G - R
-        S2 = norm_rgb[:, 1] + norm_rgb[:, 2] - 2 * norm_rgb[:, 0]  # G + R - 2B
+        S1 = norm_rgb[:, 1] - norm_rgb[:, 2]
+        S2 = norm_rgb[:, 1] + norm_rgb[:, 2] - 2 * norm_rgb[:, 0]
         
         h = S1 + (np.std(S1) / (np.std(S2) + 1e-6)) * S2
         return h
 
     def bandpass_filter(self, signal):
-        """Butterworth bandpass filter for human heart rate (50 BPM to 160 BPM)."""
+        """Butterworth bandpass filter for human pulse (50 BPM to 160 BPM)."""
         nyq = 0.5 * self.fps
         low = 0.83 / nyq   # 50 BPM
         high = 2.66 / nyq  # 160 BPM
@@ -78,15 +77,12 @@ class StableBioSenseEngine:
         if len(self.rgb_buffer) < self.window_size:
             return None
 
-        # Process signal
         bvp = self.pos_algorithm(self.rgb_buffer[-self.window_size:])
         filtered_bvp = self.bandpass_filter(bvp)
 
-        # Reject extreme noise/movement
         if np.std(filtered_bvp) > 0.4 or np.std(filtered_bvp) < 0.001:
             return self.get_median_bpm(None)
 
-        # Peak detection in frequency domain
         fft_data = np.abs(np.fft.rfft(filtered_bvp))
         freqs = np.fft.rfftfreq(len(filtered_bvp), 1.0 / self.fps)
         
@@ -98,16 +94,15 @@ class StableBioSenseEngine:
         return self.get_median_bpm(raw_bpm)
 
     def get_median_bpm(self, new_bpm):
-        """Rolling median filter to completely eliminate high/low jumping."""
+        """Rolling median filter to prevent high/low jumping."""
         if new_bpm is not None and 50 <= new_bpm <= 160:
             self.bpm_history.append(new_bpm)
-            if len(self.bpm_history) > 11:  # Keep last 11 samples
+            if len(self.bpm_history) > 11:
                 self.bpm_history.pop(0)
 
         if len(self.bpm_history) == 0:
             return None
 
-        # Return stable median value
         return float(np.median(self.bpm_history))
 
 
@@ -115,12 +110,12 @@ class StableBioSenseEngine:
 cap = cv2.VideoCapture(0)
 engine = StableBioSenseEngine(fps=30, window_size=180)
 
-# Logging file
+# CSV Data Logger
 csv_file = open("pulse_telemetry_log.csv", mode="w", newline="")
 csv_writer = csv.writer(csv_file)
 csv_writer.writerow(["Timestamp_s", "Heart_Rate_BPM"])
 
-print("--- Starting Stabilized BioSense Tracker Pro ---")
+print("--- Starting BioSense Tracker Pro ---")
 start_time = time.time()
 
 while cap.isOpened():
@@ -137,7 +132,7 @@ while cap.isOpened():
         mean_bgr = engine.extract_forehead_skin(frame, face_box)
 
         if mean_bgr is not None:
-            engine.rgb_buffer.append([mean_bgr[2], mean_bgr[1], mean_bgr[0]])  # R, G, B
+            engine.rgb_buffer.append([mean_bgr[2], mean_bgr[1], mean_bgr[0]])
 
             if len(engine.rgb_buffer) > 300:
                 engine.rgb_buffer.pop(0)
